@@ -1,0 +1,72 @@
+name: fintech-ledger
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fintech_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ledger_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ledger_secret_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-ledger_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_ledger_data:/var/lib/postgresql/data
+      - ./services/ledger-core/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ledger_admin} -d ${POSTGRES_DB:-ledger_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ledger-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: fintech_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_ledger_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - ledger-net
+
+  ledger-core:
+    build:
+      context: ./services/ledger-core
+      dockerfile: Dockerfile
+    container_name: fintech_ledger_core
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${POSTGRES_USER:-ledger_admin}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-ledger_secret_pass}
+      DB_NAME: ${POSTGRES_DB:-ledger_db}
+      REDIS_ADDR: redis:6379
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ledger-net
+
+volumes:
+  pg_ledger_data:
+  redis_ledger_data:
+
+networks:
+  ledger-net:
+    driver: bridge
