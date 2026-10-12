@@ -1,4 +1,4 @@
-# Project 1: Fintech High-Throughput Ledger Engine
+# Fintech High-Throughput Ledger Engine
 
 Motor transaccional inmutable para sistemas bancarios y pasarelas de pago basado en el principio contable de partida doble (**Double-Entry Bookkeeping**) con consistencia transaccional ACID estricta en PostgreSQL y Redis.
 
