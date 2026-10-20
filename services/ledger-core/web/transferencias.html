@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mi Libro · Transferir</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar" id="topbar"></header>
+<main style="max-width:560px">
+  <div class="head"><div><h1>Mover dinero</h1><p>Pasa plata entre tus cuentas. El total no cambia.</p></div></div>
+  <form class="card" id="form" style="padding:24px" novalidate>
+    <div class="field"><label for="from">Desde</label><select id="from"></select></div>
+    <div class="field"><label for="to">Hacia</label><select id="to"></select></div>
+    <div class="field"><label for="amt">Monto</label><input id="amt" placeholder="$ 0" autocomplete="off"></div>
+    <div class="preview" id="prev" hidden style="flex-direction:column;gap:6px">
+      <div style="display:flex;justify-content:space-between"><span id="p-from"></span><b class="num" id="p-from-v"></b></div>
+      <div style="display:flex;justify-content:space-between"><span id="p-to"></span><b class="num" id="p-to-v"></b></div>
+    </div>
+    <div class="field"><label for="desc">Detalle (opcional)</label><input id="desc" maxlength="80" placeholder="Ej: Pago de arriendo"></div>
+    <p class="err" id="err" role="alert"></p>
+    <button class="btn" id="go" style="width:100%">Transferir</button>
+  </form>
+</main>
+
+<div class="overlay" id="ok" role="dialog" aria-modal="true">
+  <div class="modal" style="text-align:center">
+    <svg class="check" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="25"/><path d="M14 27l8 8 16-17"/></svg>
+    <h2 id="ok-t" style="margin-bottom:6px"></h2>
+    <p style="color:var(--ink-2);margin:0 0 18px" id="ok-s"></p>
+    <div class="actions" style="justify-content:center"><button class="btn ghost" id="again">Otra transferencia</button><a class="btn" href="/dashboard" style="text-decoration:none">Ver resumen</a></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let accounts = [], key = null;
+const acc = id => accounts.find(a => a.id === id);
+
+function fill() {
+  const assets = accounts.filter(a => a.type === 'ASSET');
+  const f = $('from').value, t = $('to').value;
+  const opts = (sel) => assets.map(a => `<option value="${a.id}" ${a.id === sel ? 'selected' : ''}>${esc(a.name)} — ${clp(a.balance_cents)}</option>`).join('');
+  $('from').innerHTML = opts(f || (assets[0] || {}).id);
+  $('to').innerHTML = opts(t || (assets[1] || {}).id);
+}
+function preview() {
+  const a = acc($('from').value), b = acc($('to').value), amt = pesos($('amt')) * 100;
+  $('prev').hidden = !amt || !a || !b;
+  if (!amt || !a || !b) return;
+  $('p-from').textContent = `${a.name} quedará con`;
+  $('p-to').textContent = `${b.name} quedará con`;
+  const left = a.balance_cents - amt;
+  $('p-from-v').textContent = clp(left);
+  $('p-from-v').className = 'num' + (left < 0 ? ' neg' : '');
+  $('p-from-v').style.color = left < 0 ? 'var(--out)' : '';
+  $('p-to-v').textContent = clp(b.balance_cents + amt);
+}
+moneyInput($('amt'), preview);
+$('from').onchange = $('to').onchange = preview;
+
+async function boot() {
+  const me = await api('/api/v1/auth/me');
+  renderTopbar(me.user, 'transferir');
+  accounts = await loadAccounts(); fill();
+}
+
+$('form').addEventListener('submit', async e => {
+  e.preventDefault(); $('err').textContent = '';
+  const from = $('from').value, to = $('to').value, amt = pesos($('amt')) * 100;
+  if (from === to) return $('err').textContent = 'Elige dos cuentas distintas.';
+  if (!amt) return $('err').textContent = 'Escribe un monto mayor a cero.';
+  if (acc(from).balance_cents < amt) return $('err').textContent = `No te alcanza en ${acc(from).name}.`;
+  const btn = $('go'); btn.disabled = true; btn.textContent = 'Transfiriendo…';
+  key = key || uid();
+  try {
+    await api('/api/v1/transfers', {method: 'POST', body: {
+      idempotency_key: key, source_account_id: from, target_account_id: to,
+      amount_cents: amt, description: $('desc').value.trim() || `Transferencia a ${acc(to).name}`}});
+    key = null;
+    $('ok-t').textContent = `${clp(amt)} movidos`;
+    $('ok-s').textContent = `De ${acc(from).name} a ${acc(to).name}.`;
+    $('amt').value = ''; $('desc').value = ''; $('prev').hidden = true;
+    accounts = await loadAccounts(); fill();
+    openModal('ok');
+  } catch (ex) {
+    $('err').textContent = ex.message.startsWith('Saldo insuficiente') ? `No te alcanza en ${acc(from).name}.` : ex.message;
+  }
+  btn.disabled = false; btn.textContent = 'Transferir';
+});
+$('again').onclick = () => closeModal('ok');
+$('ok').addEventListener('click', e => { if (e.target === $('ok')) closeModal('ok'); });
+boot().catch(() => {});
+</script>
+</body>
+</html>

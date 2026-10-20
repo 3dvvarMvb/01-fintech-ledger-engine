@@ -5,11 +5,13 @@ WORKDIR /app
 
 RUN apk add --no-cache git
 
-COPY go.mod ./
-COPY main.go ./
-COPY dashboard.html ./
+# Cache Go modules layer
+COPY go.mod go.sum* ./
+RUN go mod download || true
 
-# Download dependencies and generate clean go.sum
+# Copy full source tree (supports multi-file packages: main.go, auth.go, etc.)
+COPY . .
+
 RUN go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app/ledger-service .
 

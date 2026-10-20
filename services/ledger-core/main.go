@@ -2,9 +2,10 @@ package main
 
 import (
 	"database/sql"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -15,8 +16,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-//go:embed dashboard.html
-var dashboardHTML []byte
+//go:embed web
+var webFS embed.FS
 
 // --- Domain Models ---
 
@@ -104,17 +105,43 @@ func main() {
 		time.Sleep(2 * time.Second)
 	}
 
+	if db == nil || db.Ping() != nil {
+		log.Fatalf("[FATAL] No se pudo conectar a PostgreSQL: %v", err)
+	}
+
+	if err := runAutoMigrations(db); err != nil {
+		log.Fatalf("[FATAL] Error ejecutando auto-migraciones: %v", err)
+	}
+	log.Println("[INFO] Auto-migraciones aplicadas correctamente")
+
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 
 	srv := &Server{db: db, rdb: rdb}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", srv.handleHealth)
-	mux.HandleFunc("/dashboard", srv.handleDashboard)
-	mux.HandleFunc("/api/v1/accounts", srv.handleAccounts)
-	mux.HandleFunc("/api/v1/transfers", srv.handleTransfer)
-	mux.HandleFunc("/api/v1/transactions", srv.handleTransactions)
-	mux.HandleFunc("/api/v1/audit", srv.handleAudit)
+
+	// Pages
+	mux.HandleFunc("/", srv.handleRoot)
+	mux.HandleFunc("/login", srv.servePage("login.html"))
+	mux.HandleFunc("/logout", srv.handleLogout)
+	mux.HandleFunc("/dashboard", srv.protectedPage("dashboard.html"))
+	mux.HandleFunc("/transferencias", srv.protectedPage("transferencias.html"))
+	mux.HandleFunc("/estres-acid", srv.servePage("estres.html"))
+	staticFS, _ := fs.Sub(webFS, "web/static")
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+
+	// Auth Endpoints (Public & Authenticated)
+	mux.HandleFunc("/api/v1/auth/register", srv.handleRegister)
+	mux.HandleFunc("/api/v1/auth/login", srv.handleLogin)
+	mux.HandleFunc("/api/v1/auth/me", srv.AuthMiddleware(srv.handleMe))
+
+	// Protected Ledger API Endpoints (Guarded by AuthMiddleware)
+	mux.HandleFunc("/api/v1/accounts", srv.AuthMiddleware(srv.handleAccounts))
+	mux.HandleFunc("/api/v1/deposits", srv.AuthMiddleware(srv.handleDeposit))
+	mux.HandleFunc("/api/v1/transfers", srv.AuthMiddleware(srv.handleTransfer))
+	mux.HandleFunc("/api/v1/transactions", srv.AuthMiddleware(srv.handleTransactions))
+	mux.HandleFunc("/api/v1/audit", srv.AuthMiddleware(srv.handleAudit))
 	mux.HandleFunc("/api/v1/stress-test", srv.handleStressTest)
 
 	log.Printf("[INFO] ========================================================")
@@ -125,6 +152,32 @@ func main() {
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Fatalf("[FATAL] Error en el servidor HTTP: %v", err)
 	}
+}
+
+func runAutoMigrations(db *sql.DB) error {
+	migrationSQL := `
+	CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+	CREATE TABLE IF NOT EXISTS users (
+		id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+		email VARCHAR(255) UNIQUE NOT NULL,
+		password_hash VARCHAR(255) NOT NULL,
+		full_name VARCHAR(255) NOT NULL,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE CASCADE;
+	CREATE INDEX IF NOT EXISTS idx_accounts_user_id ON accounts(user_id);
+
+	ALTER TABLE transactions ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE CASCADE;
+	CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions(user_id);
+	ALTER TABLE transactions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
+	`
+	_, err := db.Exec(migrationSQL)
+	return err
 }
 
 // --- Handlers ---
@@ -140,17 +193,22 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(dashboardHTML)
-}
-
 func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
+	userID, ok := GetUserIDFromContext(r.Context())
+	if !ok {
+		http.Error(w, `{"error": "unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
 	if r.Method == http.MethodGet {
-		rows, err := s.db.Query("SELECT id, account_number, name, type, currency, balance_cents, created_at FROM accounts ORDER BY account_number ASC")
+		if err := ensurePersonalAccounts(s.db, userID); err != nil {
+			http.Error(w, `{"error": "No se pudieron preparar tus cuentas"}`, http.StatusInternalServerError)
+			return
+		}
+		rows, err := s.db.Query("SELECT id, account_number, name, type, currency, balance_cents, created_at FROM accounts WHERE user_id = $1 ORDER BY created_at ASC, account_number ASC", userID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error": "%s"}`, err.Error()), http.StatusInternalServerError)
 			return
@@ -186,8 +244,8 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var newID string
-		query := `INSERT INTO accounts (account_number, name, type, balance_cents) VALUES ($1, $2, $3, $4) RETURNING id`
-		err := s.db.QueryRow(query, req.AccountNumber, req.Name, req.Type, req.InitialCents).Scan(&newID)
+		query := `INSERT INTO accounts (account_number, name, type, balance_cents, user_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`
+		err := s.db.QueryRow(query, req.AccountNumber, req.Name, req.Type, req.InitialCents, userID).Scan(&newID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error": "Error al crear cuenta: %s"}`, err.Error()), http.StatusBadRequest)
 			return
@@ -231,6 +289,13 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	userID, ok := GetUserIDFromContext(r.Context())
+	if !ok {
+		http.Error(w, `{"error": "unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	ref := txReference(userID, req.IdempotencyKey)
+
 	// 1. Iniciar Transacción con Aislamiento Estricto
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -241,7 +306,7 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 
 	// 2. Control de Idempotencia: Verificar si la clave ya existe
 	var existingTxID string
-	err = tx.QueryRow(`SELECT id FROM transactions WHERE reference_id = $1`, req.IdempotencyKey).Scan(&existingTxID)
+	err = tx.QueryRow(`SELECT id FROM transactions WHERE reference_id = $1`, ref).Scan(&existingTxID)
 	if err == nil {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -254,38 +319,55 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Bloqueo Pesimista (FOR UPDATE) para prevenir Race Conditions en saldo
+	// 3. Bloqueo Pesimista (FOR UPDATE) de ambas cuentas en orden determinista (sin deadlocks)
+	lockRows, err := tx.Query(`SELECT id, balance_cents, name, type FROM accounts
+		WHERE user_id = $1 AND id IN ($2, $3) ORDER BY id FOR UPDATE`, userID, req.SourceAccID, req.TargetAccID)
+	if err != nil {
+		http.Error(w, `{"error": "No se pudieron bloquear las cuentas"}`, http.StatusInternalServerError)
+		return
+	}
 	var sourceBalance int64
-	var sourceName, sourceType string
-	err = tx.QueryRow(`SELECT balance_cents, name, type FROM accounts WHERE id = $1 FOR UPDATE`, req.SourceAccID).Scan(&sourceBalance, &sourceName, &sourceType)
-	if err == sql.ErrNoRows {
+	var sourceName, sourceType, targetName, targetType string
+	var foundSource, foundTarget bool
+	for lockRows.Next() {
+		var id, name, typ string
+		var bal int64
+		if err := lockRows.Scan(&id, &bal, &name, &typ); err != nil {
+			lockRows.Close()
+			http.Error(w, `{"error": "Error leyendo cuentas"}`, http.StatusInternalServerError)
+			return
+		}
+		if id == req.SourceAccID {
+			foundSource, sourceBalance, sourceName, sourceType = true, bal, name, typ
+		}
+		if id == req.TargetAccID {
+			foundTarget, targetName, targetType = true, name, typ
+		}
+	}
+	lockRows.Close()
+
+	if !foundSource {
 		http.Error(w, `{"error": "Cuenta origen no encontrada"}`, http.StatusNotFound)
 		return
-	} else if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error": "%s"}`, err.Error()), http.StatusInternalServerError)
+	}
+	if !foundTarget {
+		http.Error(w, `{"error": "Cuenta destino no encontrada"}`, http.StatusNotFound)
+		return
+	}
+	if sourceType == externalFundsType || targetType == externalFundsType {
+		http.Error(w, `{"error": "Esa cuenta no admite transferencias"}`, http.StatusBadRequest)
 		return
 	}
 
 	if sourceType == "ASSET" && sourceBalance < req.AmountCents {
-		http.Error(w, fmt.Sprintf(`{"error": "Fondos insuficientes en %s. Saldo disponible: %d centavos, Requerido: %d centavos"}`,
-			sourceName, sourceBalance, req.AmountCents), http.StatusUnprocessableEntity)
-		return
-	}
-
-	var targetName string
-	err = tx.QueryRow(`SELECT name FROM accounts WHERE id = $1 FOR UPDATE`, req.TargetAccID).Scan(&targetName)
-	if err == sql.ErrNoRows {
-		http.Error(w, `{"error": "Cuenta destino no encontrada"}`, http.StatusNotFound)
-		return
-	} else if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error": "%s"}`, err.Error()), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf(`{"error": "Saldo insuficiente en %s"}`, sourceName), http.StatusUnprocessableEntity)
 		return
 	}
 
 	// 4. Registrar Transacción Inmutable
 	var txID string
-	insertTxSQL := `INSERT INTO transactions (reference_id, description, status) VALUES ($1, $2, 'COMMITTED') RETURNING id`
-	err = tx.QueryRow(insertTxSQL, req.IdempotencyKey, req.Description).Scan(&txID)
+	insertTxSQL := `INSERT INTO transactions (reference_id, description, status, user_id) VALUES ($1, $2, 'COMMITTED', $3) RETURNING id`
+	err = tx.QueryRow(insertTxSQL, ref, req.Description, userID).Scan(&txID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": "Error al registrar transacción: %s"}`, err.Error()), http.StatusInternalServerError)
 		return
@@ -340,10 +422,12 @@ func (s *Server) handleTransactions(w http.ResponseWriter, r *http.Request) {
 		FROM transactions t
 		JOIN ledger_entries le ON t.id = le.transaction_id
 		JOIN accounts a ON le.account_id = a.id
+		WHERE t.user_id = $1
 		ORDER BY t.created_at DESC, le.direction ASC
-		LIMIT 100
+		LIMIT 200
 	`
-	rows, err := s.db.Query(query)
+	listUser, _ := GetUserIDFromContext(r.Context())
+	rows, err := s.db.Query(query, listUser)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": "%s"}`, err.Error()), http.StatusInternalServerError)
 		return
@@ -400,14 +484,16 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 
 	query := `
 		SELECT 
-			COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount_cents ELSE 0 END), 0) as total_debits,
-			COALESCE(SUM(CASE WHEN direction = 'CREDIT' THEN amount_cents ELSE 0 END), 0) as total_credits,
-			COUNT(DISTINCT account_id) as active_accounts
-		FROM ledger_entries;
+			COALESCE(SUM(CASE WHEN le.direction = 'DEBIT' THEN le.amount_cents ELSE 0 END), 0) as total_debits,
+			COALESCE(SUM(CASE WHEN le.direction = 'CREDIT' THEN le.amount_cents ELSE 0 END), 0) as total_credits,
+			COUNT(DISTINCT le.account_id) as active_accounts
+		FROM ledger_entries le JOIN accounts a ON a.id = le.account_id
+		WHERE a.user_id = $1;
 	`
+	auditUser, _ := GetUserIDFromContext(r.Context())
 	var debits, credits int64
 	var accountsCount int
-	err := s.db.QueryRow(query).Scan(&debits, &credits, &accountsCount)
+	err := s.db.QueryRow(query, auditUser).Scan(&debits, &credits, &accountsCount)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": "%s"}`, err.Error()), http.StatusInternalServerError)
 		return
@@ -431,7 +517,16 @@ func (s *Server) handleStressTest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	rows, err := s.db.Query("SELECT id FROM accounts LIMIT 2")
+	// Ensure system benchmark accounts exist (user_id IS NULL)
+	_, _ = s.db.Exec(`
+		INSERT INTO accounts (id, account_number, name, type, currency, balance_cents)
+		VALUES 
+			('a0000000-0000-0000-0000-000000000001', 'ACC-1001', 'Cash & Bank Reserves', 'ASSET', 'USD', 100000000),
+			('a0000000-0000-0000-0000-000000000004', 'ACC-1002', 'Secondary System Reserve', 'ASSET', 'USD', 100000000)
+		ON CONFLICT (account_number) DO UPDATE SET balance_cents = EXCLUDED.balance_cents;
+	`)
+
+	rows, err := s.db.Query("SELECT id FROM accounts WHERE user_id IS NULL AND type = 'ASSET' ORDER BY account_number ASC LIMIT 2")
 	if err != nil {
 		http.Error(w, `{"error": "No hay cuentas para simulación"}`, http.StatusInternalServerError)
 		return

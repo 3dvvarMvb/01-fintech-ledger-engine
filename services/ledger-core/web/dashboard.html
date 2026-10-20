@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mi Libro · Resumen</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="bg-surface font-sans">
+<header class="topbar" id="topbar"></header>
+<main>
+  <section class="total" aria-live="polite">
+    <div><small>Total disponible</small><span class="amount num" id="total"><span class="sk" style="display:inline-block;width:240px;height:2.6rem;opacity:.35"></span></span></div>
+    <button class="btn" id="add">+ Agregar dinero</button>
+  </section>
+
+  <section aria-labelledby="h-acc">
+    <div class="head" style="margin-bottom:14px"><h2 id="h-acc">Mis cuentas</h2></div>
+    <div class="accounts" id="accounts">
+      <div class="acc">
+        <span class="tag"><span class="dot" style="background:#3B8C3A"></span>Banco Falabella</span>
+        <span class="bal num">$ 0</span>
+      </div>
+      <div class="acc">
+        <span class="tag"><span class="dot" style="background:#E07B1F"></span>Banco Estado</span>
+        <span class="bal num">$ 0</span>
+      </div>
+      <div class="acc">
+        <span class="tag"><span class="dot" style="background:#1E6B66"></span>Efectivo</span>
+        <span class="bal num">$ 0</span>
+      </div>
+      <div class="acc">
+        <span class="tag"><span class="dot" style="background:#7A5BB5"></span>Ahorros</span>
+        <span class="bal num">$ 0</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="h-led">
+    <div class="card-h">
+      <h2 id="h-led">Libro mayor</h2>
+      <div class="filters" id="filters" role="group" aria-label="Filtrar por mes">
+        <button class="chip" data-f="month" aria-pressed="true">Este mes</button>
+        <button class="chip" data-f="all" aria-pressed="false">Todo</button>
+      </div>
+    </div>
+    <div id="ledger"><div style="padding:18px 22px;display:grid;gap:14px"><div class="sk" style="height:40px"></div><div class="sk" style="height:40px"></div><div class="sk" style="height:40px"></div></div></div>
+  </section>
+</main>
+
+<div class="overlay" id="dep" role="dialog" aria-modal="true" aria-labelledby="dep-t">
+  <form class="modal" id="dep-form" novalidate>
+    <div id="dep-body">
+      <h2 id="dep-t">Agregar dinero</h2>
+      <div class="field"><label for="dep-acc">¿A qué cuenta?</label><select id="dep-acc"></select></div>
+      <div class="field"><label for="dep-amt">Monto</label><input id="dep-amt" placeholder="$ 0" autocomplete="off"></div>
+      <div class="preview" id="dep-prev" hidden><span>Quedará con</span><b class="num" id="dep-after"></b></div>
+      <div class="field"><label for="dep-desc">Detalle (opcional)</label><input id="dep-desc" placeholder="Ej: Sueldo, venta, regalo" maxlength="80"></div>
+      <p class="err" id="dep-err" role="alert"></p>
+      <div class="actions"><button type="button" class="btn ghost" id="dep-cancel">Cancelar</button><button class="btn" id="dep-go">Agregar</button></div>
+    </div>
+    <div id="dep-ok" hidden style="text-align:center">
+      <svg class="check" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="25"/><path d="M14 27l8 8 16-17"/></svg>
+      <h2 id="dep-ok-t" style="margin-bottom:6px"></h2>
+      <p style="color:var(--ink-2);margin:0 0 18px">Ya aparece en tu libro mayor.</p>
+      <button type="button" class="btn" id="dep-close">Listo</button>
+    </div>
+  </form>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let accounts = [], movements = [], filter = 'month', focusAcc = null;
+
+async function boot() {
+  const me = await api('/api/v1/auth/me');
+  renderTopbar(me.user, 'resumen');
+  await refresh(true);
+}
+
+async function refresh(first) {
+  const [accs, txs] = await Promise.all([loadAccounts(), api('/api/v1/transactions')]);
+  accounts = accs; movements = toMovements(txs);
+  renderAccounts(first); renderLedger();
+}
+
+function renderAccounts(animate) {
+  const visible = accounts.filter(a => a.type === 'ASSET');
+  const total = visible.reduce((s, a) => s + a.balance_cents, 0);
+  animate ? countUp($('total'), total) : $('total').textContent = clp(total);
+  $('accounts').innerHTML = visible.map((a, i) => `
+    <button class="acc" data-id="${a.id}" style="animation-delay:${i * 70}ms" aria-pressed="${focusAcc === a.id}" title="Ver solo esta cuenta">
+      <span class="tag"><span class="dot" style="background:${colorFor(a.name)}"></span>${esc(a.name)}</span>
+      <span class="bal num">${clp(a.balance_cents)}</span>
+      <span class="hint">${focusAcc === a.id ? 'Mostrando solo esta cuenta' : 'Toca para filtrar el libro'}</span>
+    </button>`).join('');
+  $('accounts').querySelectorAll('.acc').forEach(b => b.onclick = () => {
+    focusAcc = focusAcc === b.dataset.id ? null : b.dataset.id; renderAccounts(false); renderLedger();
+  });
+}
+
+function renderLedger() {
+  const now = new Date();
+  const name = focusAcc && (accounts.find(a => a.id === focusAcc) || {}).name;
+  const list = movements.filter(m =>
+    (filter === 'all' || (m.date.getMonth() === now.getMonth() && m.date.getFullYear() === now.getFullYear())) &&
+    (!name || m.from === name || m.to === name));
+  if (!list.length) {
+    $('ledger').innerHTML = `<div class="empty"><p style="font-weight:600;margin:0 0 4px">Aún no hay movimientos${filter === 'month' ? ' este mes' : ''}.</p>
+      <p style="margin:0">Agrega tu primer ingreso con “Agregar dinero”.</p></div>`;
+    return;
+  }
+  $('ledger').innerHTML = list.map((m, i) => {
+    const incoming = m.kind === 'in' || (name && m.to === name);
+    const outgoing = m.kind === 'move' && name && m.from === name;
+    const cls = m.kind === 'in' ? 'in' : outgoing ? 'out' : incoming ? 'in' : 'move';
+    const sign = cls === 'in' ? '+' : cls === 'out' ? '−' : '';
+    const sub = m.kind === 'in' ? `Ingreso a ${esc(m.to)}` : `${esc(m.from)} → ${esc(m.to)}`;
+    return `<div class="row" style="animation-delay:${Math.min(i, 12) * 30}ms">
+      <div class="ico ${cls}" aria-hidden="true">${cls === 'in' ? '↓' : cls === 'out' ? '↑' : '⇄'}</div>
+      <div><div class="t">${esc(m.desc)}</div><div class="s">${sub}</div></div>
+      <div><div class="a num ${cls}">${sign}${clp(m.amount)}</div><div class="when">${fmtDate(m.date)}</div></div>
+    </div>`;
+  }).join('');
+}
+
+$('filters').querySelectorAll('.chip').forEach(c => c.onclick = () => {
+  filter = c.dataset.f;
+  $('filters').querySelectorAll('.chip').forEach(x => x.setAttribute('aria-pressed', x === c));
+  renderLedger();
+});
+
+// Deposit modal
+function updatePreview() {
+  const acc = accounts.find(a => a.id === $('dep-acc').value), amt = pesos($('dep-amt'));
+  $('dep-prev').hidden = !amt || !acc;
+  if (acc && amt) $('dep-after').textContent = clp(acc.balance_cents + amt * 100);
+}
+moneyInput($('dep-amt'), updatePreview);
+$('dep-acc').onchange = updatePreview;
+$('add').onclick = () => {
+  $('dep-acc').innerHTML = accounts.filter(a => a.type === 'ASSET').map(a => `<option value="${a.id}" ${a.id === focusAcc ? 'selected' : ''}>${esc(a.name)} — ${clp(a.balance_cents)}</option>`).join('');
+  $('dep-body').hidden = false; $('dep-ok').hidden = true;
+  $('dep-amt').value = ''; $('dep-desc').value = ''; $('dep-err').textContent = ''; $('dep-prev').hidden = true;
+  openModal('dep');
+};
+$('dep-cancel').onclick = () => closeModal('dep');
+$('dep-close').onclick = () => closeModal('dep');
+$('dep').addEventListener('click', e => { if (e.target === $('dep')) closeModal('dep'); });
+let depKey = null;
+$('dep-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  if ($('dep-body').hidden) return;
+  const amt = pesos($('dep-amt'));
+  if (!amt) { $('dep-err').textContent = 'Escribe un monto mayor a cero.'; return; }
+  const btn = $('dep-go'); btn.disabled = true; btn.textContent = 'Agregando…';
+  depKey = depKey || uid();
+  try {
+    await api('/api/v1/deposits', {method: 'POST', body: {
+      idempotency_key: depKey, account_id: $('dep-acc').value, amount_cents: amt * 100,
+      description: $('dep-desc').value.trim() || 'Ingreso de dinero'}});
+    depKey = null;
+    const name = accounts.find(a => a.id === $('dep-acc').value).name;
+    $('dep-ok-t').textContent = `${clp(amt * 100)} agregados a ${name}`;
+    $('dep-body').hidden = true; $('dep-ok').hidden = false;
+    await refresh(true);
+  } catch (ex) { $('dep-err').textContent = ex.message; }
+  btn.disabled = false; btn.textContent = 'Agregar';
+});
+
+boot().catch(() => {});
+</script>
+</body>
+</html>

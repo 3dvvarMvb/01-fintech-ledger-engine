@@ -1,0 +1,46 @@
+# Development & Agent tools
+.agents/
+agents/
+graphify-out/
+*graphify*
+*impeccable*
+.impeccable/
+impeccable/
+
+# Architecture & planning docs (internal development)
+PROJECT.md
+TEST_INFRA.md
+TEST_READY.md
+EJECUCION.md
+PRODUCT.md
+
+# Testing artifacts & runners
+tests/
+
+# Environment, secrets & local configs
+.env
+.env.*
+*.local
+*.secret
+
+# Go build & test artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+services/ledger-core/ledger-service
+
+# Database & cache volumes / local storage
+pg_ledger_data/
+redis_ledger_data/
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

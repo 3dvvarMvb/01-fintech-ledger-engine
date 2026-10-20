@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mi Libro · Ingresar</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="auth">
+  <section class="auth-art" aria-hidden="true">
+    <a class="brand" style="color:#fff"><i style="background:#fff"></i>Mi Libro</a>
+    <div>
+      <h1>Tu plata, en orden.</h1>
+      <p>Ve cuánto tienes en el banco y en efectivo, y a dónde se fue cada peso.</p>
+    </div>
+    <span class="orb a"></span><span class="orb b"></span>
+  </section>
+  <section class="auth-form">
+    <div class="auth-box">
+      <h2 id="title">Bienvenido de vuelta</h2>
+      <p style="color:var(--ink-2);margin:0">Ingresa con tu correo para ver tus cuentas.</p>
+      <div class="tabs" role="tablist">
+        <button role="tab" id="t-login" aria-selected="true">Ingresar</button>
+        <button role="tab" id="t-reg" aria-selected="false">Crear cuenta</button>
+      </div>
+      <form id="form" novalidate>
+        <div class="field" id="f-name" hidden>
+          <label for="name">Nombre</label>
+          <input id="name" autocomplete="name" placeholder="María Pérez">
+        </div>
+        <div class="field">
+          <label for="email">Correo</label>
+          <input id="email" type="email" autocomplete="email" placeholder="tu@correo.com" required>
+        </div>
+        <div class="field">
+          <label for="pass">Contraseña</label>
+          <input id="pass" type="password" autocomplete="current-password" required>
+          <p class="hint" id="pass-hint" hidden>Mínimo 6 caracteres.</p>
+        </div>
+        <p class="err" id="err" role="alert"></p>
+        <button class="btn" id="go" type="submit">Ingresar</button>
+      </form>
+    </div>
+  </section>
+</div>
+<script src="/static/app.js"></script>
+<script>
+let mode = 'login';
+const $ = id => document.getElementById(id);
+function setMode(m) {
+  mode = m;
+  $('t-login').setAttribute('aria-selected', m === 'login');
+  $('t-reg').setAttribute('aria-selected', m === 'reg');
+  $('f-name').hidden = m === 'login';
+  $('pass-hint').hidden = m === 'login';
+  $('title').textContent = m === 'login' ? 'Bienvenido de vuelta' : 'Crea tu cuenta';
+  $('go').textContent = m === 'login' ? 'Ingresar' : 'Crear mi cuenta';
+  $('pass').autocomplete = m === 'login' ? 'current-password' : 'new-password';
+  $('err').textContent = '';
+}
+$('t-login').onclick = () => setMode('login');
+$('t-reg').onclick = () => setMode('reg');
+$('form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = $('go'); $('err').textContent = '';
+  const email = $('email').value.trim(), password = $('pass').value, full_name = $('name').value.trim();
+  if (!email.includes('@')) return $('err').textContent = 'Revisa tu correo.';
+  if (mode === 'reg' && !full_name) return $('err').textContent = 'Escribe tu nombre.';
+  if (mode === 'reg' && password.length < 6) return $('err').textContent = 'La contraseña necesita al menos 6 caracteres.';
+  btn.disabled = true; const label = btn.textContent; btn.textContent = 'Un momento…';
+  try {
+    await api(mode === 'login' ? '/api/v1/auth/login' : '/api/v1/auth/register',
+      {method: 'POST', body: mode === 'login' ? {email, password} : {email, password, full_name}});
+    location.href = '/dashboard';
+  } catch (ex) {
+    const m = ex.message;
+    $('err').textContent = m === 'invalid credentials' ? 'Correo o contraseña incorrectos.'
+      : m === 'email already registered' ? 'Ese correo ya tiene una cuenta. Prueba ingresar.'
+      : m === 'invalid input' ? 'Revisa los datos ingresados.' : m;
+    btn.disabled = false; btn.textContent = label;
+  }
+});
+</script>
+</body>
+</html>

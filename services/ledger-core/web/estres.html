@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mi Libro · Simulación</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="bg-surface font-sans">
+<header class="topbar" id="topbar">
+  <a class="brand" href="/dashboard"><i></i>Mi Libro</a>
+  <nav aria-label="Principal">
+    <a href="/dashboard">Resumen</a>
+    <a href="/transferencias">Transferir</a>
+  </nav>
+  <div class="user"><a href="/logout">Salir</a></div>
+</header>
+<main style="max-width:680px">
+  <div class="head">
+    <div>
+      <h1>Prueba de concurrencia</h1>
+      <p>Simulación de operaciones simultáneas de prueba en tiempo real.</p>
+    </div>
+  </div>
+  <div class="card" style="padding:24px;display:grid;gap:18px">
+    <p style="color:var(--ink-2);margin:0">
+      Esta herramienta ejecuta transacciones concurrentes automáticas sobre cuentas de prueba del sistema para verificar la integridad de los saldos.
+    </p>
+    <button class="btn" id="run-btn" style="width:fit-content">Iniciar simulación</button>
+    <div id="results" class="preview" hidden style="flex-direction:column;gap:8px">
+      <div style="display:flex;justify-content:space-between"><span>Estado:</span><b id="res-status">Completado</b></div>
+      <div style="display:flex;justify-content:space-between"><span>Operaciones concurrentes:</span><b id="res-ops" class="num">0</b></div>
+      <div style="display:flex;justify-content:space-between"><span>Transacciones exitosas:</span><b id="res-succ" class="num">0</b></div>
+    </div>
+  </div>
+</main>
+<script src="/static/app.js"></script>
+<script>
+const btn = document.getElementById('run-btn');
+const results = document.getElementById('results');
+btn.addEventListener('click', async () => {
+  btn.disabled = true;
+  btn.textContent = 'Ejecutando…';
+  try {
+    const res = await api('/api/v1/stress-test', { method: 'POST' });
+    document.getElementById('res-status').textContent = 'Completado con éxito';
+    document.getElementById('res-ops').textContent = res.concurrent_ops || 10;
+    document.getElementById('res-succ').textContent = res.successful_txs || 10;
+    results.hidden = false;
+  } catch (err) {
+    alert('Error al ejecutar: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Iniciar simulación';
+  }
+});
+</script>
+</body>
+</html>
